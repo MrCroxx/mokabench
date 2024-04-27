@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
-use crate::{config::Config, parser::TraceEntry};
+use crate::{config::Config, parser::TraceEntry, EvictionCounters, Report};
 
-use super::{CacheDriver, Counters, Key, Value};
+use super::{AsyncCacheDriver, CacheDriver, Counters, Key, Value};
 
-use ::foyer::{Cache, CacheBuilder};
+use ::foyer::{
+    Cache, CacheBuilder, FsDeviceConfigBuilder, HybridCache, HybridCacheBuilder,
+    RatedTicketAdmissionPolicy,
+};
+use async_trait::async_trait;
 
 #[derive(Clone)]
 pub struct FoyerCache {
@@ -78,5 +82,111 @@ impl CacheDriver<TraceEntry> for FoyerCache {
         }
 
         counters.add_to_report(report);
+    }
+}
+
+#[derive(Clone)]
+pub struct FoyerHybridCache {
+    config: Arc<Config>,
+    cache: HybridCache<Key, Value>,
+}
+
+impl FoyerHybridCache {
+    pub async fn new(config: &Config, capacity: usize) -> Self {
+        if let Some(_ttl) = config.ttl {
+            todo!()
+        }
+        if let Some(_tti) = config.tti {
+            todo!()
+        }
+
+        let mut builder = HybridCacheBuilder::new().memory(capacity).with_shards(64);
+
+        if config.size_aware {
+            builder = builder.with_weighter(|_key: &Key, value: &Value| value.0 as usize);
+        }
+
+        let cache = builder
+            .storage()
+            .with_device_config(FsDeviceConfigBuilder::new("/p44pro/mokabench/foyer").build())
+            .with_admission_policy(Arc::new(RatedTicketAdmissionPolicy::new(500 * (1 << 20))))
+            .build()
+            .await
+            .unwrap();
+
+        let config = Arc::new(config.clone());
+
+        Self { config, cache }
+    }
+
+    async fn get(&self, key: &usize) -> bool {
+        self.cache.get(key).await.unwrap().is_some()
+    }
+
+    fn insert(&self, key: usize, req_id: usize) {
+        let value = super::make_value(&self.config, key, req_id);
+        super::sleep_thread_for_insertion(&self.config);
+        self.cache.insert(key, value);
+    }
+}
+
+#[async_trait]
+
+impl AsyncCacheDriver<TraceEntry> for FoyerHybridCache {
+    async fn get_or_insert(&mut self, entry: &TraceEntry, report: &mut Report) {
+        let mut counters = Counters::default();
+        let mut req_id = entry.line_number();
+
+        for block in entry.range() {
+            if self.get(&block).await {
+                counters.read_hit();
+            } else {
+                self.insert(block, req_id);
+                counters.inserted();
+                counters.read_missed();
+            }
+            req_id += 1;
+        }
+
+        counters.add_to_report(report);
+    }
+
+    async fn get_or_insert_once(&mut self, _entry: &TraceEntry, _report: &mut Report) {
+        unimplemented!()
+    }
+
+    async fn update(&mut self, entry: &TraceEntry, report: &mut Report) {
+        let mut counters = Counters::default();
+        let mut req_id = entry.line_number();
+
+        for block in entry.range() {
+            self.insert(block, req_id);
+            counters.inserted();
+            req_id += 1;
+        }
+
+        counters.add_to_report(report);
+    }
+
+    async fn invalidate(&mut self, entry: &TraceEntry) {
+        for block in entry.range() {
+            self.cache.remove(&block).unwrap();
+        }
+    }
+
+    fn invalidate_all(&mut self) {
+        self.cache.clear().unwrap();
+    }
+
+    fn invalidate_entries_if(&mut self, _entry: &TraceEntry) {
+        unimplemented!()
+    }
+
+    async fn iterate(&mut self) {
+        unimplemented!()
+    }
+
+    fn eviction_counters(&self) -> Option<Arc<EvictionCounters>> {
+        unimplemented!()
     }
 }

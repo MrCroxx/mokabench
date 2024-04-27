@@ -58,6 +58,8 @@ use report::ReportBuilder;
 
 #[cfg(feature = "foyer")]
 use crate::cache::foyer::FoyerCache;
+#[cfg(feature = "foyer")]
+use crate::cache::foyer::FoyerHybridCache;
 #[cfg(feature = "hashlink")]
 use crate::cache::hashlink::HashLink;
 #[cfg(any(feature = "mini-moka", feature = "moka-v08", feature = "moka-v09"))]
@@ -234,6 +236,17 @@ pub fn run_multi_threads_foyer(
     let report_builder =
         ReportBuilder::new("Foyer In-memory Cache", capacity as _, Some(num_clients));
     run_multi_threads(config, num_clients, cache_driver, report_builder)
+}
+
+#[cfg(feature = "foyer")]
+pub async fn run_multi_tasks_hybrid_foyer(
+    config: &Config,
+    capacity: usize,
+    num_clients: u16,
+) -> anyhow::Result<Report> {
+    let cache_driver = FoyerHybridCache::new(config, capacity).await;
+    let report_builder = ReportBuilder::new("Foyer Hybrid Cache", capacity as _, Some(num_clients));
+    run_multi_tasks(config, num_clients, cache_driver, report_builder).await
 }
 
 #[cfg(any(feature = "mini-moka", feature = "moka-v08", feature = "moka-v09"))]
